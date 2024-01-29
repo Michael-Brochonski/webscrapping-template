@@ -20,7 +20,16 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-# Clone projects and find PDFs
+# Function to check if a branch is within the 3-month range
+is_branch_within_range() {
+    local branch_date="$1"
+    local recent_date="$2"
+    local max_diff=$((60*60*24*30*3)) # 3 months in seconds
+    local diff=$((recent_date - branch_date))
+    [ $diff -le $max_diff ]
+}
+
+# Clone or update projects and find PDFs
 echo "$PROJECTS" | jq -r '.[].http_url_to_repo' | while read repo; do
     # Modify the HTTPS URL to include the access token for authentication
     repo_with_token=$(echo $repo | sed "s|https://|https://oauth2:$ACCESS_TOKEN@|")
@@ -28,17 +37,35 @@ echo "$PROJECTS" | jq -r '.[].http_url_to_repo' | while read repo; do
     # Extract project name
     project_name=$(basename $repo .git)
 
-    # Clone the project using the modified HTTPS URL with disabled SSL verification
-    GIT_SSL_NO_VERIFY=true git clone $repo_with_token $project_name
+    # Check if the project directory exists
+    if [ -d "$project_name" ]; then
+        # Update the repository
+        (cd "$project_name" && git pull)
+    else
+        # Clone the project using the modified HTTPS URL with disabled SSL verification
+        GIT_SSL_NO_VERIFY=true git clone $repo_with_token $project_name
+    fi
 
-    # Check if git clone was successful
+    # Check if git operation was successful
     if [ $? -ne 0 ]; then
-        echo "Failed to clone repository: $repo"
+        echo "Failed to operate on repository: $repo"
         continue
     fi
 
-    # Find and copy PDF files
-    find $project_name -name '*.pdf' -exec cp {} "$DEST_FOLDER" \;
+    # Get the most recent branch date in Unix timestamp
+    recent_branch_date=$(cd "$project_name" && git for-each-ref --sort=-committerdate --format='%(committerdate:unix)' refs/heads | head -n 1)
+
+    # Get all branches up to 3 months older than the most recent branch
+    branches=$(cd "$project_name" && git for-each-ref --sort=-committerdate --format='%(committerdate:unix) %(refname:short)' refs/heads | while read branch_date branch_name; do
+        if is_branch_within_range "$branch_date" "$recent_branch_date"; then
+            echo "$branch_name"
+        fi
+    done)
+
+    # Checkout each branch and copy PDF files
+    for branch in $branches; do
+        (cd "$project_name" && git checkout "$branch" && find . -name '*.pdf' -exec cp {} "$DEST_FOLDER" \;)
+    done
 done
 
 echo "PDF extraction complete. Check your destination folder: $DEST_FOLDER"
